@@ -26,12 +26,13 @@ if (window.BASE_EXP) {
   PLACEMENT.forEach((r, i) => { r[4] = BASE_EXP.placement[i]; });
 }
 
-function fresh() { return { level: null, done: {}, xp: 0, streak: 0, last: null, wrong: [], vocab: {}, tests: [], hist: [], recent: [], settings: { why: true, preview: false } }; }
+function fresh() { return { level: null, done: {}, xp: 0, streak: 0, last: null, wrong: [], vocab: {}, tests: [], hist: [], recent: [], settings: { why: true, preview: false, auto: true }, rev: 0 }; }
 function load() { try { return Object.assign(fresh(), JSON.parse(localStorage.getItem(KEY))); } catch { return fresh(); } }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} }
+function save(keep) { if (!keep) S.rev = Date.now(); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} }
+const stateSig = window.stateSig;
 let S = load();
 const cfg = () => { // 같은 객체를 돌려줘야 cfg().why = ... 가 저장된다
-  const d = { why: true, preview: false };
+  const d = { why: true, preview: false, auto: true };
   if (!S.settings || typeof S.settings !== 'object') S.settings = {};
   for (const k in d) if (!(k in S.settings)) S.settings[k] = d[k];
   return S.settings;
@@ -329,7 +330,7 @@ function placementResult(asked, check, ids) {
   const prev = (S.tests || []).slice(-1)[0];
   S.tests = (S.tests || []).concat({ d: today(), est: +estF.toFixed(2), right, n: asked.length, lessons: Object.keys(S.done).length }).slice(-30);
   S.recent = (S.recent || []).concat(ids).slice(-45);
-  const oldLevel = S.level; if (!check) S.level = est; save();
+  const oldLevel = S.level; if (!check) S.level = est; save(); scheduleSync();
   app.innerHTML = '';
   const box = el('div', 'scroll center');
   const delta = prev ? estF - prev.est : null;
@@ -428,6 +429,7 @@ function home() {
   if (nextI < 0 && lv < 5) { const u = el('button', 'btn primary', `Lv.${lv + 1} 로 올라가기`); u.onclick = () => { S.level = lv + 1; save(); home(); }; st.append(u); }
   const bk = el('button', 'btn ghost', '☁️ 백업 · 복원'); bk.onclick = backupSheet; st.append(bk);
   sc.append(st);
+  if (ghCfg().token) { const sn = el('div', 'note', syncMsg); sn.id = 'syncnote'; sc.append(sn); }
   sc.append(el('div', 'note', `진행 ${doneN} / ${UNITS[lv].length} 유닛 · 기록은 이 기기에 저장돼요`));
   app.append(top, sc);
 }
@@ -463,8 +465,9 @@ function levelSheet() {
   document.body.append(ov);
 }
 
-/* ---------- GitHub 백업 / 복원 ----------
-   기록(S)을 내 비공개 저장소의 progress.json 으로 올리고 내려받는다.
+/* ---------- GitHub 동기화 (자동 백업 · 복원) ----------
+   기록(S)을 내 비공개 저장소의 progress.json 과 주고받는다.
+   올리기 전에 서버 기록과 먼저 합쳐서(merge.js) 다른 기기의 기록을 덮어쓰지 않는다.
    토큰은 이 기기 localStorage에만 두며, 백업 파일에는 포함하지 않는다. */
 const GH_KEY = 'my-english-gh', GH_REPO = 'hjcho86/my-english-data', GH_PATH = 'progress.json';
 const ghCfg = () => { try { return JSON.parse(localStorage.getItem(GH_KEY)) || {}; } catch { return {}; } };
@@ -472,50 +475,107 @@ const ghSet = c => { try { localStorage.setItem(GH_KEY, JSON.stringify(c)); } ca
 const ghUrl = () => `https://api.github.com/repos/${GH_REPO}/contents/${GH_PATH}`;
 const ghHead = (tok, raw) => ({ Authorization: 'Bearer ' + tok, Accept: raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' });
 const b64 = s => btoa(unescape(encodeURIComponent(s)));
+const unb64 = s => decodeURIComponent(escape(atob(s.replace(/\n/g, ''))));
 function ghErr(status) {
   const e = new Error(status === 401 || status === 403 ? '토큰이 올바르지 않거나 권한이 없어요' : status === 404 ? '저장소를 찾을 수 없어요 (토큰 권한을 확인하세요)' : '오류가 발생했어요 (' + status + ')');
   e.status = status; return e;
 }
-async function ghUpload(tok) {
-  let sha;
+async function ghGetRemote(tok) { // 서버 기록과 파일 버전(sha)
   const g = await fetch(ghUrl() + '?t=' + Date.now(), { headers: ghHead(tok), cache: 'no-store' });
-  if (g.ok) sha = (await g.json()).sha; else if (g.status !== 404) throw ghErr(g.status);
-  const body = { message: 'backup ' + new Date().toISOString(), content: b64(JSON.stringify(S)) };
+  if (g.status === 404) return { data: null, sha: null };
+  if (!g.ok) throw ghErr(g.status);
+  const j = await g.json();
+  let text;
+  if (j.content) text = unb64(j.content);
+  else { const r = await fetch(ghUrl() + '?t=' + Date.now(), { headers: ghHead(tok, true), cache: 'no-store' }); if (!r.ok) throw ghErr(r.status); text = await r.text(); }
+  return { data: JSON.parse(text), sha: j.sha };
+}
+async function ghPut(tok, obj, sha) {
+  const body = { message: 'backup ' + new Date().toISOString(), content: b64(JSON.stringify(obj)) };
   if (sha) body.sha = sha;
   const p = await fetch(ghUrl(), { method: 'PUT', headers: { ...ghHead(tok), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (p.status === 409 || p.status === 422) { const e = ghErr(p.status); e.conflict = true; throw e; } // 그 사이 다른 기기가 올림
   if (!p.ok) throw ghErr(p.status);
 }
-async function ghDownload(tok) {
-  const g = await fetch(ghUrl() + '?t=' + Date.now(), { headers: ghHead(tok, true), cache: 'no-store' });
-  if (g.status === 404) { const e = new Error('저장된 백업이 아직 없어요'); e.status = 404; throw e; }
-  if (!g.ok) throw ghErr(g.status);
-  return JSON.parse(await g.text());
+
+let syncBusy = false, syncMsg = '', syncAt = 0, syncTimer = null;
+const autoOn = () => !!ghCfg().token && cfg().auto;
+function setSync(msg) { syncMsg = msg; const n = document.getElementById('syncnote'); if (n) n.textContent = msg; }
+const hhmm = () => new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+
+/* 서버 기록과 합친 뒤 필요하면 이 기기·서버를 갱신한다 */
+async function syncNow() {
+  const tok = ghCfg().token; if (!tok) throw Object.assign(new Error('토큰을 먼저 입력해 주세요'), { status: 1 });
+  if (syncBusy) return { skipped: true };
+  syncBusy = true;
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { data, sha } = await ghGetRemote(tok);
+      const merged = data ? mergeState(S, data) : S;
+      const needLocal = stateSig(merged) !== stateSig(S);
+      const needUpload = !data || stateSig(merged) !== stateSig(data);
+      if (needLocal) { S = Object.assign(fresh(), merged); save(true); }
+      if (needUpload) {
+        try { await ghPut(tok, S, sha); } catch (e) { if (e.conflict && attempt === 0) continue; throw e; }
+      }
+      ghSet({ ...ghCfg(), last: new Date().toLocaleString('ko-KR') }); syncAt = Date.now();
+      return { changedLocal: needLocal, uploaded: needUpload };
+    }
+  } finally { syncBusy = false; }
 }
+async function autoSync() {
+  if (!autoOn() || syncBusy) return;
+  setSync('☁️ 동기화 중...');
+  try {
+    const r = await syncNow();
+    setSync('☁️ 동기화됨 ' + hhmm());
+    if (r && r.changedLocal && document.querySelector('.topbar')) home(); // 홈 화면일 때만 새 기록으로 다시 그림
+  } catch (e) { setSync('⚠️ 동기화 실패: ' + (e.status ? e.message : '오프라인')); }
+}
+function scheduleSync(ms = 2500) { if (!autoOn()) return; clearTimeout(syncTimer); syncTimer = setTimeout(autoSync, ms); }
+// 앱을 열 때 / 다시 앞으로 올 때 가져오고, 백그라운드로 갈 때 올린다
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { clearTimeout(syncTimer); autoSync(); }
+  else if (Date.now() - syncAt > 60000) autoSync();
+});
+
 function backupSheet() {
-  const cfg = ghCfg();
+  const cfgG = ghCfg();
   const ov = el('div', 'overlay'), sh = el('div', 'sheet'); ov.append(sh);
-  sh.append(el('h3', '', '☁️ 백업 · 복원'));
-  sh.append(el('p', 'hint', '학습 기록을 내 GitHub 비공개 저장소에 저장하고 불러와요.'));
+  sh.append(el('h3', '', '☁️ 백업 · 동기화'));
+  sh.append(el('p', 'hint', '학습 기록을 내 GitHub 비공개 저장소와 자동으로 주고받아요. 여러 기기에서 써도 기록이 합쳐져요.'));
   const inp = el('input', 'ans'); inp.type = 'password'; inp.placeholder = 'GitHub 토큰 (처음 한 번만 입력)';
-  inp.autocomplete = 'off'; inp.autocapitalize = 'off'; inp.spellcheck = false; inp.value = cfg.token || '';
-  const status = el('div', 'hint', cfg.last ? '마지막 백업: ' + cfg.last : '아직 백업한 적이 없어요');
-  const up = el('button', 'btn primary', '⬆️ 저장하기 (GitHub에 올리기)'), down = el('button', 'btn', '⬇️ 불러오기 (GitHub에서 가져오기)'), close = el('button', 'btn ghost', '닫기');
-  sh.append(inp, status, up, down, close);
-  const busy = on => { up.disabled = down.disabled = on; };
+  inp.autocomplete = 'off'; inp.autocapitalize = 'off'; inp.spellcheck = false; inp.value = cfgG.token || '';
+  const status = el('div', 'hint', cfgG.last ? '마지막 동기화: ' + cfgG.last : '아직 동기화한 적이 없어요');
+  sh.append(inp);
+  // 자동 동기화 스위치
+  const r = el('button', 'lvrow'), sw = el('span', 'sw');
+  const paint = () => { sw.className = 'sw' + (cfg().auto ? ' on' : ''); sw.textContent = cfg().auto ? '켜짐' : '꺼짐'; };
+  r.innerHTML = '<span><b>자동 동기화</b><small>앱을 열 때, 레슨을 끝낼 때, 앱을 닫을 때 자동으로 합쳐요.</small></span>'; r.append(sw); paint();
+  r.onclick = () => { cfg().auto = !cfg().auto; save(); paint(); if (cfg().auto) scheduleSync(300); };
+  sh.append(r, status);
+  const now = el('button', 'btn primary', '🔄 지금 동기화'), restore = el('button', 'btn ghost', '⬇️ 서버 기록으로 덮어쓰기 (복원)'), close = el('button', 'btn ghost', '닫기');
+  sh.append(now, restore, close);
+  const busy = on => { now.disabled = restore.disabled = on; };
   const tokenOk = () => { const t = inp.value.trim(); if (!t) { status.textContent = '토큰을 먼저 입력해 주세요'; return null; } ghSet({ ...ghCfg(), token: t }); return t; };
   const fail = e => { status.textContent = '⚠️ ' + (e.status ? e.message : '인터넷 연결을 확인해 주세요'); busy(false); };
-  up.onclick = async () => {
-    const t = tokenOk(); if (!t) return; busy(true); status.textContent = '올리는 중...';
-    try { await ghUpload(t); const now = new Date().toLocaleString('ko-KR'); ghSet({ ...ghCfg(), last: now }); status.textContent = '✅ 저장 완료 · ' + now; busy(false); } catch (e) { fail(e); }
+  now.onclick = async () => {
+    if (!tokenOk()) return; busy(true); status.textContent = '동기화 중...';
+    try {
+      const res = await syncNow();
+      const t = ghCfg().last; status.textContent = res && res.skipped ? '이미 동기화 중이에요' : '✅ 동기화 완료 · ' + t; setSync('☁️ 동기화됨 ' + hhmm()); busy(false);
+      if (res && res.changedLocal) { ov.remove(); home(); }
+    } catch (e) { fail(e); }
   };
-  down.onclick = async () => {
+  restore.onclick = async () => {
     const t = tokenOk(); if (!t) return; busy(true); status.textContent = '가져오는 중...';
     try {
-      const d = await ghDownload(t);
-      if (!d || typeof d.done !== 'object' || d.done === null) throw Object.assign(new Error('백업 파일 형식이 올바르지 않아요'), { status: 1 });
-      const mine = Object.keys(S.done).length, theirs = Object.keys(d.done).length;
-      if (!confirm(`백업 불러오기\n\n현재 이 폰: ${mine}레슨 · XP ${S.xp}\n백업 내용: ${theirs}레슨 · XP ${d.xp || 0}\n\n현재 기록을 백업 내용으로 덮어쓸까요?`)) { status.textContent = '취소했어요'; busy(false); return; }
-      S = Object.assign(fresh(), d); save(); ov.remove(); home();
+      const { data } = await ghGetRemote(t);
+      if (!data) throw Object.assign(new Error('저장된 백업이 아직 없어요'), { status: 404 });
+      if (typeof data.done !== 'object' || data.done === null) throw Object.assign(new Error('백업 파일 형식이 올바르지 않아요'), { status: 1 });
+      const mine = Object.keys(S.done).length, theirs = Object.keys(data.done).length;
+      if (!confirm(`서버 기록으로 덮어쓰기\n\n현재 이 기기: ${mine}레슨 · XP ${S.xp}\n서버 기록: ${theirs}레슨 · XP ${data.xp || 0}\n\n이 기기 기록은 사라져요. 계속할까요?`)) { status.textContent = '취소했어요'; busy(false); return; }
+      S = Object.assign(fresh(), data); save(true); ov.remove(); home();
     } catch (e) { fail(e); }
   };
   close.onclick = () => ov.remove();
@@ -582,7 +642,7 @@ function runSession(exs, meta) {
       S.done[meta.lv + '-' + meta.ui] = (S.done[meta.lv + '-' + meta.ui] || 0) + 1;
       S.todayN = (S.todayD === today() ? S.todayN : 0) + 1; S.todayD = today(); viewCh = null;
     }
-    save();
+    save(); scheduleSync();
     app.innerHTML = '';
     const box = el('div', 'scroll center');
     box.innerHTML = `<div class="big">${acc >= 90 ? '🏆' : '🎉'}</div><div class="h1">${meta.review ? '복습 완료!' : '레슨 완료!'}</div>
@@ -611,3 +671,4 @@ function runSession(exs, meta) {
 }
 
 home();
+autoSync(); // 앱을 열 때 서버 기록과 합침
