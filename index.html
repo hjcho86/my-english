@@ -12,21 +12,19 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="icon-192.png">
 <title>My English</title>
-<link rel="stylesheet" href="style.css">
+<script>
+/* 캐시 때문에 폰이 예전 파일을 쓰지 않도록, 파일 주소에 5분 단위 버전을 붙여서 불러온다 */
+(function () {
+  var v = Math.floor(Date.now() / 300000);
+  document.write('<link rel="stylesheet" href="style.css?v=' + v + '">');
+  window.__loadApp = function () {
+    ["data.js", "content/lv1a.js", "content/lv1b.js", "content/lv2a.js", "content/lv2b.js", "content/lv3a.js", "content/lv3b.js", "content/lv4a.js", "content/lv4b.js", "content/lv5a.js", "content/lv5b.js", "app.js"].forEach(function (f) { document.write('<script src="' + f + '?v=' + v + '"><\/script>'); });
+  };
+})();
+</script>
 </head>
 <body>
 <div id="app"></div>
-<script src="data.js"></script>
-<script src="content/lv1a.js"></script>
-<script src="content/lv1b.js"></script>
-<script src="content/lv2a.js"></script>
-<script src="content/lv2b.js"></script>
-<script src="content/lv3a.js"></script>
-<script src="content/lv3b.js"></script>
-<script src="content/lv4a.js"></script>
-<script src="content/lv4b.js"></script>
-<script src="content/lv5a.js"></script>
-<script src="content/lv5b.js"></script>
-<script src="app.js"></script>
+<script>__loadApp();</script>
 </body>
 </html>
