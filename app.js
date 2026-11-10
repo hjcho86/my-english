@@ -352,6 +352,7 @@ function home() {
   const st = el('div', 'stack');
   if (S.wrong.length) { const r = el('button', 'btn', `🔁 틀린 문제 복습 (${S.wrong.length})`); r.onclick = runReview; st.append(r); }
   if (nextI < 0 && lv < 5) { const u = el('button', 'btn primary', `Lv.${lv + 1} 로 올라가기`); u.onclick = () => { S.level = lv + 1; save(); home(); }; st.append(u); }
+  const bk = el('button', 'btn ghost', '☁️ 백업 · 복원'); bk.onclick = backupSheet; st.append(bk);
   sc.append(st);
   sc.append(el('div', 'note', `진행 ${doneN} / ${UNITS[lv].length} 유닛 · 기록은 이 기기에 저장돼요`));
   app.append(top, sc);
@@ -368,6 +369,66 @@ function levelSheet() {
   const t = el('button', 'btn', '레벨 테스트 다시 보기'); t.onclick = () => { ov.remove(); startPlacement(true); };
   const rs = el('button', 'btn ghost', '모든 기록 초기화'); rs.onclick = () => { if (confirm('XP, 연속일, 진행 상황이 모두 지워져요. 계속할까요?')) { S = fresh(); save(); ov.remove(); home(); } };
   sh.append(t, rs);
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.body.append(ov);
+}
+
+/* ---------- GitHub 백업 / 복원 ----------
+   기록(S)을 내 비공개 저장소의 progress.json 으로 올리고 내려받는다.
+   토큰은 이 기기 localStorage에만 두며, 백업 파일에는 포함하지 않는다. */
+const GH_KEY = 'my-english-gh', GH_REPO = 'hjcho86/my-english-data', GH_PATH = 'progress.json';
+const ghCfg = () => { try { return JSON.parse(localStorage.getItem(GH_KEY)) || {}; } catch { return {}; } };
+const ghSet = c => { try { localStorage.setItem(GH_KEY, JSON.stringify(c)); } catch {} };
+const ghUrl = () => `https://api.github.com/repos/${GH_REPO}/contents/${GH_PATH}`;
+const ghHead = (tok, raw) => ({ Authorization: 'Bearer ' + tok, Accept: raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' });
+const b64 = s => btoa(unescape(encodeURIComponent(s)));
+function ghErr(status) {
+  const e = new Error(status === 401 || status === 403 ? '토큰이 올바르지 않거나 권한이 없어요' : status === 404 ? '저장소를 찾을 수 없어요 (토큰 권한을 확인하세요)' : '오류가 발생했어요 (' + status + ')');
+  e.status = status; return e;
+}
+async function ghUpload(tok) {
+  let sha;
+  const g = await fetch(ghUrl() + '?t=' + Date.now(), { headers: ghHead(tok), cache: 'no-store' });
+  if (g.ok) sha = (await g.json()).sha; else if (g.status !== 404) throw ghErr(g.status);
+  const body = { message: 'backup ' + new Date().toISOString(), content: b64(JSON.stringify(S)) };
+  if (sha) body.sha = sha;
+  const p = await fetch(ghUrl(), { method: 'PUT', headers: { ...ghHead(tok), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!p.ok) throw ghErr(p.status);
+}
+async function ghDownload(tok) {
+  const g = await fetch(ghUrl() + '?t=' + Date.now(), { headers: ghHead(tok, true), cache: 'no-store' });
+  if (g.status === 404) { const e = new Error('저장된 백업이 아직 없어요'); e.status = 404; throw e; }
+  if (!g.ok) throw ghErr(g.status);
+  return JSON.parse(await g.text());
+}
+function backupSheet() {
+  const cfg = ghCfg();
+  const ov = el('div', 'overlay'), sh = el('div', 'sheet'); ov.append(sh);
+  sh.append(el('h3', '', '☁️ 백업 · 복원'));
+  sh.append(el('p', 'hint', '학습 기록을 내 GitHub 비공개 저장소에 저장하고 불러와요.'));
+  const inp = el('input', 'ans'); inp.type = 'password'; inp.placeholder = 'GitHub 토큰 (처음 한 번만 입력)';
+  inp.autocomplete = 'off'; inp.autocapitalize = 'off'; inp.spellcheck = false; inp.value = cfg.token || '';
+  const status = el('div', 'hint', cfg.last ? '마지막 백업: ' + cfg.last : '아직 백업한 적이 없어요');
+  const up = el('button', 'btn primary', '⬆️ 저장하기 (GitHub에 올리기)'), down = el('button', 'btn', '⬇️ 불러오기 (GitHub에서 가져오기)'), close = el('button', 'btn ghost', '닫기');
+  sh.append(inp, status, up, down, close);
+  const busy = on => { up.disabled = down.disabled = on; };
+  const tokenOk = () => { const t = inp.value.trim(); if (!t) { status.textContent = '토큰을 먼저 입력해 주세요'; return null; } ghSet({ ...ghCfg(), token: t }); return t; };
+  const fail = e => { status.textContent = '⚠️ ' + (e.status ? e.message : '인터넷 연결을 확인해 주세요'); busy(false); };
+  up.onclick = async () => {
+    const t = tokenOk(); if (!t) return; busy(true); status.textContent = '올리는 중...';
+    try { await ghUpload(t); const now = new Date().toLocaleString('ko-KR'); ghSet({ ...ghCfg(), last: now }); status.textContent = '✅ 저장 완료 · ' + now; busy(false); } catch (e) { fail(e); }
+  };
+  down.onclick = async () => {
+    const t = tokenOk(); if (!t) return; busy(true); status.textContent = '가져오는 중...';
+    try {
+      const d = await ghDownload(t);
+      if (!d || typeof d.done !== 'object' || d.done === null) throw Object.assign(new Error('백업 파일 형식이 올바르지 않아요'), { status: 1 });
+      const mine = Object.keys(S.done).length, theirs = Object.keys(d.done).length;
+      if (!confirm(`백업 불러오기\n\n현재 이 폰: ${mine}레슨 · XP ${S.xp}\n백업 내용: ${theirs}레슨 · XP ${d.xp || 0}\n\n현재 기록을 백업 내용으로 덮어쓸까요?`)) { status.textContent = '취소했어요'; busy(false); return; }
+      S = Object.assign(fresh(), d); save(); ov.remove(); home();
+    } catch (e) { fail(e); }
+  };
+  close.onclick = () => ov.remove();
   ov.onclick = e => { if (e.target === ov) ov.remove(); };
   document.body.append(ov);
 }
