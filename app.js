@@ -168,7 +168,8 @@ function ask(ex, done, opts = {}) {
     lock = () => { inp.disabled = true; };
     if (ex.hear) {
       // 소리가 안 나올 때를 위한 건너뛰기: 정답·오답 어느 쪽으로도 세지 않는다
-      skip = el('button', 'btn ghost', '🔇 지금은 들을 수 없어요'); foot.append(skip);
+      // 키보드가 올라와도 가려지지 않게 하단 바가 아니라 입력칸 바로 아래에 둔다
+      skip = el('button', 'btn', '🔇 지금은 들을 수 없어요 (건너뛰기)'); skip.style.marginTop = '18px'; body.append(skip);
       skip.onclick = () => { if (phase !== 'ask') return; keyHandler = null; done('skip'); };
     } else if (skip) skip.onclick = () => finish(false, '정답: ' + ex.ans[0]);
     keyHandler = e => { if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); } };
