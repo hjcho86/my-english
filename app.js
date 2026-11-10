@@ -665,6 +665,21 @@ function runSession(exs, meta) {
       nb.onclick = () => { if (nxt[0] !== S.level) { S.level = nxt[0]; save(); } lessonIntro(nxt[0], nxt[1]); }; st.append(nb);
     }
     const b = el('button', 'btn ' + (nxt || lastOfCh ? 'ghost' : 'primary'), nxt ? '홈으로' : '계속'); b.onclick = home; st.append(b);
+    if (lastOfCh) { // 챕터를 마칠 때는 기다리지 않고 바로 저장하고 결과를 보여준다
+      const sn = el('p', 'p', '☁️ 챕터 기록을 저장하는 중...'); box.append(sn);
+      if (!ghCfg().token) sn.textContent = '☁️ 백업 토큰이 없어서 저장하지 못했어요. 홈의 "백업 · 복원"에서 설정해 주세요.';
+      else if (!cfg().auto) sn.textContent = '☁️ 자동 동기화가 꺼져 있어서 저장하지 않았어요.';
+      else {
+        clearTimeout(syncTimer);
+        (async () => {
+          try {
+            const r = await syncNow();
+            sn.textContent = r && r.skipped ? '☁️ 저장 중이에요...' : '✅ 챕터 기록을 GitHub에 저장했어요 · ' + hhmm();
+            setSync('☁️ 동기화됨 ' + hhmm());
+          } catch (e) { sn.textContent = '⚠️ 저장하지 못했어요: ' + (e.status ? e.message : '오프라인') + ' (연결되면 자동으로 다시 저장해요)'; setSync('⚠️ 동기화 실패'); }
+        })();
+      }
+    }
     box.append(st); app.append(box);
   };
   step();
