@@ -1,0 +1,460 @@
+/* My English - 개인용 영어 학습 앱 (서버 없이 동작, 진행 상황은 이 기기의 localStorage에 저장) */
+const $ = (s, e = document) => e.querySelector(s);
+const app = $('#app');
+const KEY = 'my-english-v1';
+
+/* content/*.js 가 등록한 유닛 묶음을 UNITS 뒤에 이어 붙임 (레벨, 시작 번호 순) */
+(window.UNIT_PARTS || []).slice().sort((a, b) => a.lv - b.lv || a.start - b.start)
+  .forEach(p => UNITS[p.lv].push(...p.units));
+const CH = 10; // 챕터당 유닛 수
+
+function fresh() { return { level: null, done: {}, xp: 0, streak: 0, last: null, wrong: [], vocab: {}, tests: [], hist: [], recent: [] }; }
+function load() { try { return Object.assign(fresh(), JSON.parse(localStorage.getItem(KEY))); } catch { return fresh(); } }
+function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} }
+let S = load();
+
+function el(tag, cls, txt) { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+function norm(s) { return s.toLowerCase().replace(/[’‘]/g, "'").replace(/[^a-z0-9' ]/g, ' ').replace(/\s+/g, ' ').trim(); }
+function today(d = new Date()) { return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
+function touchStreak() {
+  const t = today(); if (S.last === t) return;
+  const y = new Date(); y.setDate(y.getDate() - 1);
+  S.streak = S.last === today(y) ? S.streak + 1 : 1; S.last = t;
+}
+
+function speak(text) {
+  if (!('speechSynthesis' in window)) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text); u.lang = 'en-US'; u.rate = 0.9;
+  const v = speechSynthesis.getVoices().find(v => v.lang === 'en-US'); if (v) u.voice = v;
+  speechSynthesis.speak(u);
+}
+function sayBtn(text, big) { const b = el('button', 'say' + (big ? ' big' : ''), '🔊'); b.onclick = () => speak(text); return b; }
+
+/* ---------- 문제 생성 ---------- */
+const mk = (o) => Object.assign({ k: o.type + '|' + o.prompt + '|' + (o.ans || o.a) }, o);
+
+function distract(en, ko, pool, idx, n = 3) {
+  // 같은 단어·같은 뜻은 보기에서 제외해 정답이 둘이 되는 일을 막는다
+  const seen = new Set([idx ? ko : en]), out = [];
+  for (const p of shuffle(pool)) {
+    if (p[0] === en || p[1] === ko || seen.has(p[idx])) continue;
+    seen.add(p[idx]); out.push(p[idx]); if (out.length === n) break;
+  }
+  return out;
+}
+function mcqEnKo([en, ko], pool) {
+  const opts = [ko, ...distract(en, ko, pool, 1)];
+  return mk({ type: 'mcq', title: '알맞은 뜻을 고르세요', prompt: en, say: en, opts, a: 0, vw: en });
+}
+function mcqKoEn([en, ko], pool) {
+  const opts = [en, ...distract(en, ko, pool, 0)];
+  return mk({ type: 'mcq', title: '알맞은 영어를 고르세요', prompt: ko, opts, a: 0, vw: en });
+}
+function listenWord([en]) { return mk({ type: 'type', title: '들리는 단어를 입력하세요', prompt: '🔊', say: en, ans: [en], hear: true, vw: en }); }
+function orderSent([en, ko]) {
+  const words = en.replace(/[.?!]$/, '').split(' ');
+  return mk({ type: 'order', title: '영어로 배열하세요', prompt: ko, words, ans: en });
+}
+function listenSent([en]) { return mk({ type: 'type', title: '들리는 문장을 입력하세요', prompt: '🔊', say: en, ans: [en], hear: true }); }
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+function speakEx([en]) { return mk({ type: 'speak', title: '소리 내어 읽어 보세요', prompt: en, say: en, ans: [en] }); }
+function grammar([q, opts, a]) { return mk({ type: 'mcq', title: '빈칸에 알맞은 말을 고르세요', prompt: q, opts, a }); }
+
+function buildLesson(lv, ui) {
+  const u = UNITS[lv][ui], pool = UNITS[lv].flatMap(x => x.v);
+  const vs = shuffle(u.v), ss = shuffle(u.s), ex = [];
+  vs.slice(0, 4).forEach(v => ex.push(mcqEnKo(v, pool)));
+  vs.slice(4, 8).forEach(v => ex.push(mcqKoEn(v, pool)));
+  shuffle(u.v).slice(0, 2).forEach(v => ex.push(listenWord(v)));
+  ss.forEach(s => ex.push(orderSent(s)));
+  ex.push(listenSent(ss[0]));
+  if (SR) ex.push(speakEx(ss[1]));
+  u.g.forEach(g => ex.push(grammar(g)));
+  // 지난 유닛 단어 복습(간격 반복): 앞서 끝낸 유닛에서 최대 4개
+  const prev = [];
+  for (let i = 0; i < ui; i++) if (S.done[lv + '-' + i]) prev.push(...UNITS[lv][i].v);
+  shuffle(prev).slice(0, 4).forEach((v, i) => ex.push(i % 2 ? mcqKoEn(v, pool) : mcqEnKo(v, pool)));
+  return shuffle(ex);
+}
+
+/* ---------- 세션 공통 ---------- */
+let keyHandler = null;
+document.addEventListener('keydown', e => keyHandler && keyHandler(e));
+
+function shell(onQuit) {
+  app.innerHTML = '';
+  const top = el('div', 'top'), x = el('button', 'x', '✕'), bar = el('div', 'bar'), fill = el('i');
+  bar.append(fill); top.append(x, bar);
+  const body = el('div', 'body'); body.id = 'body';
+  const foot = el('div', 'foot'); foot.id = 'foot';
+  app.append(top, body, foot);
+  x.onclick = () => { if (confirm('그만둘까요? 이번 진행은 저장되지 않아요.')) { keyHandler = null; onQuit(); } };
+  return p => { fill.style.width = Math.round(p * 100) + '%'; };
+}
+
+/* 문제 하나를 보여주고, 사용자가 '계속'을 누르면 done(정답여부) 호출 */
+function ask(ex, done, opts = {}) {
+  const body = $('#body'), foot = $('#foot');
+  body.innerHTML = ''; foot.innerHTML = ''; foot.className = 'foot'; body.scrollTop = 0;
+  body.append(el('div', 'qtitle', ex.title || ''));
+  const btn = el('button', 'btn primary', '확인'); btn.disabled = true;
+  let skip = null;
+  if (opts.skippable) skip = el('button', 'btn ghost', '모르겠어요');
+  foot.append(btn); if (skip) foot.append(skip);
+
+  let phase = 'ask', check = () => {}, lock = () => {}, answer = '';
+  const finish = (ok, detail) => {
+    phase = 'fb'; lock();
+    foot.className = 'foot ' + (ok ? 'ok' : 'bad');
+    foot.innerHTML = '';
+    const fb = el('div', 'fb'); fb.append(el('b', '', ok ? pick(['정답!', '잘했어요!', '좋아요!']) : '아쉬워요'));
+    if (detail) fb.append(el('div', '', detail));
+    const c = el('button', 'btn ' + (ok ? 'primary' : 'danger'), '계속');
+    c.onclick = () => { keyHandler = null; done(ok); };
+    foot.append(fb, c);
+  };
+  btn.onclick = () => phase === 'ask' && !btn.disabled && check();
+
+  if (ex.type === 'mcq') {
+    const p = el('div', 'prompt'); if (ex.say) p.append(sayBtn(ex.say));
+    p.append(el('span', '', ex.prompt)); body.append(p);
+    if (ex.say) setTimeout(() => speak(ex.say), 250);
+    const opts2 = shuffle(ex.opts.map((t, i) => ({ t, ok: i === ex.a })));
+    const list = el('div', 'opts'); let sel = null;
+    const bs = opts2.map((o, i) => {
+      const b = el('button', 'opt'); b.append(el('span', 'k', i + 1), el('span', '', o.t));
+      b.onclick = () => { if (phase !== 'ask') return; sel = o; bs.forEach(x => x.classList.remove('sel')); b.classList.add('sel'); btn.disabled = false; };
+      list.append(b); return b;
+    });
+    body.append(list);
+    check = () => {
+      bs.forEach((b, i) => { if (opts2[i].ok) b.classList.add('right'); else if (opts2[i] === sel) b.classList.add('wrong'); });
+      finish(sel.ok, sel.ok ? '' : '정답: ' + ex.opts[ex.a]);
+    };
+    if (skip) skip.onclick = () => { if (phase !== 'ask') return; sel = { ok: false }; bs.forEach((b, i) => opts2[i].ok && b.classList.add('right')); finish(false, '정답: ' + ex.opts[ex.a]); };
+    keyHandler = e => {
+      if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); }
+      else if (phase === 'ask' && /^[1-9]$/.test(e.key) && bs[+e.key - 1]) bs[+e.key - 1].click();
+    };
+  }
+
+  if (ex.type === 'order') {
+    body.append(el('div', 'prompt', ex.prompt));
+    const slots = el('div', 'slots'), bank = el('div', 'bank');
+    body.append(slots, bank);
+    const chips = shuffle(ex.words.map((w, i) => ({ w, i }))); let built = [];
+    const draw = () => {
+      slots.innerHTML = ''; bank.innerHTML = '';
+      built.forEach(c => { const b = el('button', 'w', c.w); b.onclick = () => { if (phase === 'ask') { built = built.filter(x => x !== c); draw(); } }; slots.append(b); });
+      chips.forEach(c => { const b = el('button', 'w' + (built.includes(c) ? ' used' : ''), c.w); b.onclick = () => { if (phase === 'ask' && !built.includes(c)) { built.push(c); draw(); } }; bank.append(b); });
+      btn.disabled = built.length === 0;
+    };
+    draw();
+    check = () => { const ok = norm(built.map(c => c.w).join(' ')) === norm(ex.ans); finish(ok, ok ? '' : '정답: ' + ex.ans); };
+    keyHandler = e => { if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); } };
+  }
+
+  if (ex.type === 'type') {
+    if (ex.say) { body.append(el('div', 'center').appendChild(sayBtn(ex.say, true)).parentNode); setTimeout(() => speak(ex.say), 300); }
+    else body.append(el('div', 'prompt', ex.prompt));
+    body.append(el('p', 'hint', '버튼을 눌러 다시 들을 수 있어요'));
+    const inp = el('input', 'ans'); inp.autocapitalize = 'off'; inp.autocomplete = 'off'; inp.spellcheck = false; inp.placeholder = '영어로 입력';
+    inp.oninput = () => { btn.disabled = !inp.value.trim(); };
+    body.append(inp); setTimeout(() => inp.focus(), 50);
+    check = () => { const ok = ex.ans.some(a => norm(a) === norm(inp.value)); finish(ok, ok ? '' : '정답: ' + ex.ans[0]); };
+    lock = () => { inp.disabled = true; };
+    if (skip) skip.onclick = () => finish(false, '정답: ' + ex.ans[0]);
+    keyHandler = e => { if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); } };
+  }
+}
+
+/* 말하기 문제는 ask() 안에서 처리하기 위해 확장 */
+const _ask = ask;
+ask = function (ex, done, opts) {
+  if (ex.type !== 'speak') return _ask(ex, done, opts);
+  const body = $('#body'), foot = $('#foot');
+  body.innerHTML = ''; foot.innerHTML = ''; foot.className = 'foot';
+  body.append(el('div', 'qtitle', ex.title));
+  const p = el('div', 'prompt'); p.append(sayBtn(ex.say), el('span', '', ex.prompt)); body.append(p);
+  const c = el('div', 'center'), mic = el('button', 'say big', '🎤'); c.append(mic); body.append(c);
+  const status = el('p', 'hint center', '마이크를 누르고 문장을 읽어 보세요'); status.style.textAlign = 'center'; body.append(status);
+  const skip = el('button', 'btn ghost', '지금은 말할 수 없어요'); foot.append(skip);
+  let busy = false, over = false;
+  skip.onclick = () => { keyHandler = null; done(true); };
+  keyHandler = null;
+  const finish = (ok, detail) => {
+    over = true; foot.className = 'foot ' + (ok ? 'ok' : 'bad'); foot.innerHTML = '';
+    const fb = el('div', 'fb'); fb.append(el('b', '', ok ? '발음 좋아요!' : '다시 연습해요')); if (detail) fb.append(el('div', '', detail));
+    const nb = el('button', 'btn ' + (ok ? 'primary' : 'danger'), '계속'); nb.onclick = () => done(ok); foot.append(fb, nb);
+  };
+  mic.onclick = () => {
+    if (busy || over) return; busy = true; speechSynthesis.cancel();
+    const r = new SR(); r.lang = 'en-US'; r.interimResults = false; r.maxAlternatives = 3;
+    status.textContent = '듣는 중... 말해 보세요';
+    r.onresult = e => {
+      const target = norm(ex.ans[0]).split(' ');
+      let best = 0, heard = '';
+      [...e.results[0]].forEach(a => { const hw = norm(a.transcript).split(' '); const sc = target.filter(w => hw.includes(w)).length / target.length; if (sc >= best) { best = sc; heard = a.transcript; } });
+      finish(best >= 0.8, (best >= 0.8 ? '' : '정답: ' + ex.ans[0] + '\n') + '인식된 문장: ' + heard);
+    };
+    r.onerror = e => { busy = false; status.textContent = e.error === 'not-allowed' ? '마이크 권한이 필요해요. (HTTPS 주소에서만 동작)' : '인식에 실패했어요. 다시 눌러 주세요.'; };
+    r.onend = () => { busy = false; };
+    try { r.start(); } catch { busy = false; }
+  };
+};
+
+/* ---------- 실력 테스트 (처음 = 레벨 배치, 이후 = 실력 점검) ---------- */
+function testPool() {
+  const out = PLACEMENT.map((r, i) => ({ lv: r[0], q: r[1], o: r[2], a: r[3], id: 'p' + i, seen: false }));
+  for (const lv in UNITS) UNITS[lv].forEach((u, ui) => {
+    const seen = !!S.done[lv + '-' + ui];
+    u.g.forEach((g, gi) => out.push({ lv: +lv, q: g[0], o: g[1], a: g[2], id: `u${lv}-${ui}-${gi}`, seen }));
+  });
+  return out;
+}
+function startPlacement(isCheck) {
+  const check = isCheck === true && !!S.level;
+  const N = 15, asked = [], ids = []; let L = check ? S.level : 3, n = 0;
+  const used = new Set(), pool = testPool(), recent = new Set(S.recent || []);
+  app.innerHTML = '';
+  const box = el('div', 'scroll center');
+  box.innerHTML = check
+    ? '<div class="big">📊</div><div class="h1">실력 점검</div><p class="p">총 15문제예요. 지금까지 배운 것과 앞으로 배울 것이 섞여 나와요.<br>모르는 문제는 찍지 말고 <b>모르겠어요</b>를 눌러 주세요. 그래야 실력이 정확하게 나와요.</p>'
+    : '<div class="big">🎯</div><div class="h1">레벨 테스트</div><p class="p">총 15문제예요. 맞히면 어려워지고, 틀리면 쉬워져요.<br>모르는 문제는 찍지 말고 <b>모르겠어요</b>를 눌러 주세요. 그래야 정확한 레벨이 나와요.</p>';
+  const go = el('button', 'btn primary', '시작하기'), back = el('button', 'btn ghost', '돌아가기');
+  const st = el('div', 'stack'); st.append(go); if (S.level) st.append(back); box.append(st);
+  app.append(box);
+  back.onclick = home;
+  go.onclick = () => {
+    const setBar = shell(S.level ? home : () => startPlacement());
+    const next = () => {
+      setBar(n / N);
+      if (n >= N) return placementResult(asked, check, ids);
+      let q, d = 0;
+      while (!q && d <= 5) {
+        const c = pool.filter(x => !used.has(x.id) && Math.abs(x.lv - L) === d);
+        const t = c.filter(x => !x.seen && !recent.has(x.id)), t2 = c.filter(x => !recent.has(x.id));
+        const arr = t.length ? t : t2.length ? t2 : c;
+        if (arr.length) q = pick(arr); else d++;
+      }
+      used.add(q.id); ids.push(q.id);
+      ask({ type: 'mcq', title: `문제 ${n + 1} / ${N}`, prompt: q.q, opts: q.o, a: q.a },
+        ok => { asked.push({ lv: q.lv, ok }); L = Math.max(1, Math.min(5, L + (ok ? 1 : -1))); n++; next(); },
+        { skippable: true });
+    };
+    next();
+  };
+}
+
+function placementResult(asked, check, ids) {
+  const last = asked.slice(-8);
+  const estF = Math.max(1, Math.min(5, last.reduce((s, a) => s + a.lv, 0) / last.length));
+  const est = Math.round(estF), right = asked.filter(a => a.ok).length;
+  const prev = (S.tests || []).slice(-1)[0];
+  S.tests = (S.tests || []).concat({ d: today(), est: +estF.toFixed(2), right, n: asked.length, lessons: Object.keys(S.done).length }).slice(-30);
+  S.recent = (S.recent || []).concat(ids).slice(-45);
+  const oldLevel = S.level; if (!check) S.level = est; save();
+  app.innerHTML = '';
+  const box = el('div', 'scroll center');
+  const delta = prev ? estF - prev.est : null;
+  const dtxt = delta == null ? '' : Math.abs(delta) < 0.05 ? '지난 점검과 비슷해요' : (delta > 0 ? `지난 점검보다 ▲ ${delta.toFixed(1)} 올랐어요!` : `지난 점검보다 ▼ ${Math.abs(delta).toFixed(1)}`);
+  let msg = '';
+  if (!check) msg = `${LV_DESC[est]}<br>이 레벨부터 학습을 시작해요. 너무 쉽거나 어려우면 홈에서 바꿀 수 있어요.`;
+  else if (est > oldLevel) msg = `현재 Lv.${oldLevel}보다 실력이 높아요. Lv.${est}로 올려서 더 도전해 보세요!`;
+  else if (est < oldLevel) msg = `지금 레벨이 조금 어려울 수 있어요. 복습하며 천천히 가거나 Lv.${est}로 내려도 좋아요.`;
+  else msg = '현재 레벨에 잘 맞아요. 이대로 계속 가면 돼요!';
+  box.innerHTML = `<div class="big">${check && delta > 0.05 ? '📈' : '🎉'}</div><div class="h1">${check ? '실력 점검 결과' : '테스트 완료!'}</div>
+    <p class="p">${asked.length}문제 중 ${right}문제 정답</p>
+    <div class="stats"><div class="stat"><b>Lv ${estF.toFixed(1)}</b><span>${LV_NAME[est]}</span></div></div>
+    ${dtxt ? `<p class="p"><b>${dtxt}</b></p>` : ''}<p class="p">${msg}</p>`;
+  const st = el('div', 'stack');
+  if (check && est > oldLevel) { const u = el('button', 'btn primary', `Lv.${est}로 올리기`); u.onclick = () => { S.level = est; save(); home(); }; st.append(u); }
+  const b = el('button', 'btn ' + (check && est > oldLevel ? '' : 'primary'), check ? '홈으로' : '학습 시작'); b.onclick = home; st.append(b);
+  box.append(st); app.append(box);
+}
+
+/* ---------- 홈 ---------- */
+function unlocked(lv, i) { return i === 0 || S.done[lv + '-' + (i - 1)]; }
+function doneCount() { return Object.keys(S.done).length; }
+function skillCard() {
+  const c = el('div', 'skill');
+  const t = S.tests || [], last = t[t.length - 1], prev = t[t.length - 2];
+  const words = Object.values(S.vocab || {}).filter(v => v.c >= 2).length;
+  const h = (S.hist || []).slice(-10);
+  const acc = h.length ? Math.round(h.reduce((s, x) => s + x.acc, 0) / h.length) : null;
+  const since = last ? doneCount() - (last.lessons || 0) : doneCount();
+  const dueTest = since >= 10;
+  let spark = '';
+  if (t.length >= 2) {
+    const pts = t.slice(-10), W = 150, H = 44;
+    const lo = Math.min(...pts.map(p => p.est)) - 0.2, hi = Math.max(...pts.map(p => p.est)) + 0.2;
+    const xy = pts.map((p, i) => `${(i / (pts.length - 1) * (W - 8) + 4).toFixed(1)},${(H - 4 - (p.est - lo) / (hi - lo) * (H - 8)).toFixed(1)}`);
+    spark = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"><polyline fill="none" stroke="var(--blue)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" points="${xy.join(' ')}"/><circle cx="${xy[xy.length - 1].split(',')[0]}" cy="${xy[xy.length - 1].split(',')[1]}" r="4.5" fill="var(--blue)"/></svg>`;
+  }
+  const delta = last && prev ? last.est - prev.est : null;
+  const dtxt = delta == null ? '' : Math.abs(delta) < 0.05 ? '변화 없음' : (delta > 0 ? `▲ ${delta.toFixed(1)}` : `▼ ${Math.abs(delta).toFixed(1)}`);
+  c.innerHTML = `<div class="skh"><b>📊 내 실력</b><span>${last ? `마지막 점검 ${last.d.replace(/-/g, '.')}` : '아직 점검 전'}</span></div>
+    <div class="skm"><div><div class="skn">${last ? 'Lv ' + last.est.toFixed(1) : '—'}</div><div class="sks">${last ? LV_NAME[Math.round(last.est)] + (dtxt ? ' · ' + dtxt : '') : '실력 점검을 해 보세요'}</div></div>${spark}</div>
+    <div class="skrow"><div><b>${words}</b><span>익힌 단어</span></div><div><b>${acc == null ? '-' : acc + '%'}</b><span>최근 정확도</span></div><div><b>${doneCount()}</b><span>완료 레슨</span></div></div>`;
+  const b = el('button', 'btn' + (dueTest ? ' primary' : ''), dueTest ? `📊 실력 점검할 때가 됐어요 (${since}레슨 지남)` : '📊 실력 점검하기 (15문제)');
+  b.style.marginTop = '12px'; b.onclick = () => startPlacement(true); c.append(b);
+  return c;
+}
+let viewCh = null, viewLv = null;
+function home() {
+  keyHandler = null;
+  if (!S.level) return startPlacement();
+  const lv = S.level;
+  app.innerHTML = '';
+  const top = el('div', 'topbar');
+  const lvb = el('button', 'chip lv', `Lv.${lv} ${LV_NAME[lv]} ▾`); lvb.onclick = levelSheet;
+  const right = el('div'); right.style.cssText = 'display:flex;gap:6px';
+  right.append(el('div', 'chip fire', '🔥 ' + S.streak), el('div', 'chip xp', '⭐ ' + S.xp));
+  top.append(lvb, right);
+  const sc = el('div', 'scroll');
+  const doneN = UNITS[lv].filter((_, i) => S.done[lv + '-' + i]).length;
+  const nextI = UNITS[lv].findIndex((_, i) => !S.done[lv + '-' + i]);
+  const ban = el('div', 'banner');
+  const todayDone = S.todayD === today() ? S.todayN : 0;
+  ban.innerHTML = nextI < 0
+    ? `<small>${LV_DESC[lv]}</small><b>🎊 이 레벨을 모두 마쳤어요!</b>`
+    : `<small>▶ 다음 레슨 · 유닛 ${nextI + 1}${todayDone ? ` · 오늘 ${todayDone}레슨 완료` : ''}</small><b>${UNITS[lv][nextI].i} ${UNITS[lv][nextI].t}</b>`;
+  if (nextI >= 0) { ban.style.cursor = 'pointer'; ban.onclick = () => lessonIntro(lv, nextI); }
+  sc.append(ban, skillCard());
+  // 챕터 선택 (10유닛씩)
+  const nCh = Math.ceil(UNITS[lv].length / CH);
+  if (viewLv !== lv) { viewLv = lv; viewCh = null; }
+  const curCh = viewCh != null ? viewCh : Math.floor((nextI < 0 ? UNITS[lv].length - 1 : nextI) / CH);
+  if (nCh > 1) {
+    const tabs = el('div', 'chtabs');
+    for (let c = 0; c < nCh; c++) {
+      const from = c * CH, to = Math.min(UNITS[lv].length, from + CH);
+      const full = UNITS[lv].slice(from, to).every((_, k) => S.done[lv + '-' + (from + k)]);
+      const b = el('button', 'chtab' + (c === curCh ? ' cur' : '') + (full ? ' full' : ''), full ? '✓' + (c + 1) : String(c + 1));
+      b.onclick = () => { viewCh = c; home(); }; tabs.append(b);
+    }
+    sc.append(el('div', 'sec', `챕터 ${curCh + 1} / ${nCh}`), tabs);
+  }
+  const path = el('div', 'path'); const off = [0, 36, 56, 36];
+  const from = curCh * CH, to = Math.min(UNITS[lv].length, from + CH);
+  for (let i = from; i < to; i++) {
+    const u = UNITS[lv][i];
+    const node = el('div', 'node'); node.style.transform = `translateX(${off[(i - from) % 4]}px)`;
+    const ok = unlocked(lv, i), done = S.done[lv + '-' + i];
+    const c = el('button', 'circle' + (done ? ' done' : '') + (ok ? '' : ' locked'), ok ? (done ? '✓' : u.i) : '🔒');
+    if (ok) c.onclick = () => lessonIntro(lv, i);
+    node.append(c, el('div', 'nt', `${i + 1}. ${u.t}`)); path.append(node);
+  }
+  sc.append(path);
+  const st = el('div', 'stack');
+  if (S.wrong.length) { const r = el('button', 'btn', `🔁 틀린 문제 복습 (${S.wrong.length})`); r.onclick = runReview; st.append(r); }
+  if (nextI < 0 && lv < 5) { const u = el('button', 'btn primary', `Lv.${lv + 1} 로 올라가기`); u.onclick = () => { S.level = lv + 1; save(); home(); }; st.append(u); }
+  sc.append(st);
+  sc.append(el('div', 'note', `진행 ${doneN} / ${UNITS[lv].length} 유닛 · 기록은 이 기기에 저장돼요`));
+  app.append(top, sc);
+}
+
+function levelSheet() {
+  const ov = el('div', 'overlay'), sh = el('div', 'sheet'); ov.append(sh);
+  sh.append(el('h3', '', '레벨 선택'));
+  for (let l = 1; l <= 5; l++) {
+    const r = el('button', 'lvrow' + (l === S.level ? ' cur' : ''));
+    r.innerHTML = `<span><b>Lv.${l} ${LV_NAME[l]}</b><small>${LV_DESC[l]}</small></span>`;
+    r.onclick = () => { S.level = l; save(); ov.remove(); home(); }; sh.append(r);
+  }
+  const t = el('button', 'btn', '레벨 테스트 다시 보기'); t.onclick = () => { ov.remove(); startPlacement(true); };
+  const rs = el('button', 'btn ghost', '모든 기록 초기화'); rs.onclick = () => { if (confirm('XP, 연속일, 진행 상황이 모두 지워져요. 계속할까요?')) { S = fresh(); save(); ov.remove(); home(); } };
+  sh.append(t, rs);
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.body.append(ov);
+}
+
+/* ---------- 레슨 ---------- */
+function lessonIntro(lv, ui) {
+  const u = UNITS[lv][ui]; app.innerHTML = '';
+  const sc = el('div', 'scroll');
+  sc.append(el('div', 'h1', `${u.i} ${u.t}`), el('p', 'p', '먼저 단어와 문장을 훑어보세요. 🔊를 누르면 발음을 들을 수 있어요.'));
+  sc.append(el('div', 'sec', '단어'));
+  const vl = el('div', 'vlist');
+  u.v.forEach(([e, m]) => { const r = el('div', 'vrow'); const d = el('div'); d.append(el('div', 'e', e), el('div', 'm', m)); r.append(sayBtn(e), d); vl.append(r); });
+  sc.append(vl, el('div', 'sec', '문장'));
+  const sl = el('div', 'vlist');
+  u.s.forEach(([e, m]) => { const r = el('div', 'vrow'); const d = el('div'); d.append(el('div', 'e', e), el('div', 'm', m)); r.append(sayBtn(e), d); sl.append(r); });
+  sc.append(sl);
+  const go = el('button', 'btn primary', '레슨 시작'), bk = el('button', 'btn ghost', '뒤로');
+  go.onclick = () => runSession(buildLesson(lv, ui), { lv, ui }); bk.onclick = home;
+  const st = el('div', 'stack'); st.append(go, bk); sc.append(st);
+  app.append(sc);
+}
+
+function recordWrong(ex) {
+  if (S.wrong.some(w => w.k === ex.k)) return;
+  const { retry, ...c } = ex; S.wrong.push(c); if (S.wrong.length > 60) S.wrong.shift();
+}
+function clearWrong(ex) { S.wrong = S.wrong.filter(w => w.k !== ex.k); }
+
+function runReview() {
+  const items = shuffle(S.wrong).slice(0, 10);
+  runSession(items, { review: true });
+}
+
+function runSession(exs, meta) {
+  const setBar = shell(home); const total = exs.length; const q = exs.slice();
+  let doneN = 0, mistakes = 0;
+  const step = () => {
+    setBar(doneN / total);
+    if (!q.length) return complete();
+    const ex = q.shift();
+    ask(ex, ok => {
+      if (ex.vw) { const v = S.vocab[ex.vw] || (S.vocab[ex.vw] = { c: 0, w: 0 }); ok ? v.c++ : v.w++; }
+      if (ok) { doneN++; clearWrong(ex); }
+      else {
+        mistakes++; recordWrong(ex);
+        const t = (ex.tries || 0) + 1;
+        if (t < 3) q.push({ ...ex, tries: t }); else doneN++;
+      }
+      save(); step();
+    });
+  };
+  const complete = () => {
+    keyHandler = null; touchStreak();
+    const acc = Math.max(0, Math.round((1 - mistakes / (total + mistakes)) * 100));
+    const gain = meta.review ? 5 : 10 + (mistakes <= 2 ? 5 : 0);
+    S.xp += gain;
+    S.hist = (S.hist || []).concat({ d: today(), acc, review: !!meta.review }).slice(-60);
+    if (!meta.review) {
+      S.done[meta.lv + '-' + meta.ui] = (S.done[meta.lv + '-' + meta.ui] || 0) + 1;
+      S.todayN = (S.todayD === today() ? S.todayN : 0) + 1; S.todayD = today(); viewCh = null;
+    }
+    save();
+    app.innerHTML = '';
+    const box = el('div', 'scroll center');
+    box.innerHTML = `<div class="big">${acc >= 90 ? '🏆' : '🎉'}</div><div class="h1">${meta.review ? '복습 완료!' : '레슨 완료!'}</div>
+      <div class="stats"><div class="stat"><b>+${gain}</b><span>XP</span></div><div class="stat"><b>${acc}%</b><span>정확도</span></div><div class="stat"><b>${S.streak}</b><span>연속 일수</span></div></div>`;
+    const st = el('div', 'stack');
+    // 하루 제한 없이 바로 다음 레슨으로 이어하기 (레벨 끝이면 다음 레벨 첫 유닛)
+    let nxt = null;
+    if (!meta.review) {
+      if (meta.ui + 1 < UNITS[meta.lv].length) nxt = [meta.lv, meta.ui + 1];
+      else if (meta.lv < 5) nxt = [meta.lv + 1, 0];
+    }
+    const lastOfCh = !meta.review && ((meta.ui + 1) % CH === 0 || meta.ui + 1 === UNITS[meta.lv].length);
+    const lastT = (S.tests || []).slice(-1)[0], since = doneCount() - (lastT ? lastT.lessons || 0 : 0);
+    if (lastOfCh || since >= 10) {
+      box.insertAdjacentHTML('beforeend', `<p class="p">${lastOfCh ? '🎯 챕터를 마쳤어요!' : ''} 실력이 얼마나 늘었는지 확인해 볼까요? (${since}레슨 동안 점검 안 함)</p>`);
+      const tb = el('button', 'btn primary', '📊 실력 점검하기'); tb.onclick = () => startPlacement(true); st.append(tb);
+    }
+    if (nxt) {
+      const nb = el('button', 'btn' + (lastOfCh || since >= 10 ? '' : ' primary'), '▶ 다음 레슨 계속');
+      nb.onclick = () => { if (nxt[0] !== S.level) { S.level = nxt[0]; save(); } lessonIntro(nxt[0], nxt[1]); }; st.append(nb);
+    }
+    const b = el('button', 'btn ' + (nxt || lastOfCh ? 'ghost' : 'primary'), nxt ? '홈으로' : '계속'); b.onclick = home; st.append(b);
+    box.append(st); app.append(box);
+  };
+  step();
+}
+
+home();
