@@ -166,7 +166,11 @@ function ask(ex, done, opts = {}) {
     body.append(inp); setTimeout(() => inp.focus(), 50);
     check = () => { const ok = ex.ans.some(a => norm(a) === norm(inp.value)); finish(ok, ok ? '' : '정답: ' + ex.ans[0]); };
     lock = () => { inp.disabled = true; };
-    if (skip) skip.onclick = () => finish(false, '정답: ' + ex.ans[0]);
+    if (ex.hear) {
+      // 소리가 안 나올 때를 위한 건너뛰기: 정답·오답 어느 쪽으로도 세지 않는다
+      skip = el('button', 'btn ghost', '🔇 지금은 들을 수 없어요'); foot.append(skip);
+      skip.onclick = () => { if (phase !== 'ask') return; keyHandler = null; done('skip'); };
+    } else if (skip) skip.onclick = () => finish(false, '정답: ' + ex.ans[0]);
     keyHandler = e => { if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); } };
   }
 }
@@ -183,7 +187,7 @@ ask = function (ex, done, opts) {
   const status = el('p', 'hint center', '마이크를 누르고 문장을 읽어 보세요'); status.style.textAlign = 'center'; body.append(status);
   const skip = el('button', 'btn ghost', '지금은 말할 수 없어요'); foot.append(skip);
   let busy = false, over = false;
-  skip.onclick = () => { keyHandler = null; done(true); };
+  skip.onclick = () => { keyHandler = null; done('skip'); };
   keyHandler = null;
   const finish = (ok, detail) => {
     over = true; foot.className = 'foot ' + (ok ? 'ok' : 'bad'); foot.innerHTML = '';
@@ -470,6 +474,7 @@ function runSession(exs, meta) {
     if (!q.length) return complete();
     const ex = q.shift();
     ask(ex, ok => {
+      if (ok === 'skip') { doneN++; step(); return; } // 듣기·말하기 건너뛰기: 채점·기록 없이 진행
       if (ex.vw) { const v = S.vocab[ex.vw] || (S.vocab[ex.vw] = { c: 0, w: 0 }); ok ? v.c++ : v.w++; }
       if (ok) { doneN++; clearWrong(ex); }
       else {
