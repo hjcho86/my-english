@@ -8,10 +8,36 @@ const KEY = 'my-english-v1';
   .forEach(p => UNITS[p.lv].push(...p.units));
 const CH = 10; // 챕터당 유닛 수
 
-function fresh() { return { level: null, done: {}, xp: 0, streak: 0, last: null, wrong: [], vocab: {}, tests: [], hist: [], recent: [] }; }
+/* content/exp/*.js 의 문법 해설을 각 문제(g[3])와 레벨 테스트(r[4])에 붙임 */
+(window.EXP_PARTS || []).forEach(p => p.exp.forEach((arr, i) => {
+  const u = UNITS[p.lv][p.start - 1 + i];
+  if (u) arr.forEach((t, j) => { if (u.g[j]) u.g[j][3] = t; });
+}));
+(window.TR_PARTS || []).forEach(p => p.tr.forEach((arr, i) => {
+  const u = UNITS[p.lv][p.start - 1 + i];
+  if (u) arr.forEach((t, j) => { if (u.g[j]) u.g[j][4] = t; });
+}));
+if (window.BASE_TR) {
+  Object.keys(BASE_TR.units).forEach(lv => BASE_TR.units[lv].forEach((arr, i) => arr.forEach((t, j) => { const g = UNITS[lv][i] && UNITS[lv][i].g[j]; if (g) g[4] = t; })));
+  PLACEMENT.forEach((r, i) => { r[5] = BASE_TR.placement[i]; });
+}
+if (window.BASE_EXP) {
+  Object.keys(BASE_EXP.units).forEach(lv => BASE_EXP.units[lv].forEach((arr, i) => arr.forEach((t, j) => { const g = UNITS[lv][i] && UNITS[lv][i].g[j]; if (g) g[3] = t; })));
+  PLACEMENT.forEach((r, i) => { r[4] = BASE_EXP.placement[i]; });
+}
+
+function fresh() { return { level: null, done: {}, xp: 0, streak: 0, last: null, wrong: [], vocab: {}, tests: [], hist: [], recent: [], settings: { why: true, preview: false } }; }
 function load() { try { return Object.assign(fresh(), JSON.parse(localStorage.getItem(KEY))); } catch { return fresh(); } }
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} }
 let S = load();
+const cfg = () => { // 같은 객체를 돌려줘야 cfg().why = ... 가 저장된다
+  const d = { why: true, preview: false };
+  if (!S.settings || typeof S.settings !== 'object') S.settings = {};
+  for (const k in d) if (!(k in S.settings)) S.settings[k] = d[k];
+  return S.settings;
+};
+const applyWhy = () => document.body.classList.toggle('nowhy', !cfg().why);
+applyWhy();
 
 function el(tag, cls, txt) { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
 function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
@@ -45,29 +71,43 @@ function distract(en, ko, pool, idx, n = 3) {
   }
   return out;
 }
-function mcqEnKo([en, ko], pool) {
+// 어휘 해설: 뜻 + 같은 레벨 예문 하나
+function vocabWhy(lv, en, ko) {
+  let line = `'${en}' = ${ko}`;
+  const re = new RegExp('\\b' + en.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+  for (const u of UNITS[lv] || []) { const s = u.s.find(x => re.test(x[0])); if (s) { line += `\n예문: ${s[0]} (${s[1]})`; break; } }
+  return line;
+}
+function mcqEnKo([en, ko], pool, lv) {
   const opts = [ko, ...distract(en, ko, pool, 1)];
-  return mk({ type: 'mcq', title: '알맞은 뜻을 고르세요', prompt: en, say: en, opts, a: 0, vw: en });
+  return mk({ type: 'mcq', title: '알맞은 뜻을 고르세요', prompt: en, say: en, opts, a: 0, vw: en, why: vocabWhy(lv, en, ko) });
 }
-function mcqKoEn([en, ko], pool) {
+function mcqKoEn([en, ko], pool, lv) {
   const opts = [en, ...distract(en, ko, pool, 0)];
-  return mk({ type: 'mcq', title: '알맞은 영어를 고르세요', prompt: ko, opts, a: 0, vw: en });
+  return mk({ type: 'mcq', title: '알맞은 영어를 고르세요', prompt: ko, opts, a: 0, vw: en, why: vocabWhy(lv, en, ko) });
 }
-function listenWord([en]) { return mk({ type: 'type', title: '들리는 단어를 입력하세요', prompt: '🔊', say: en, ans: [en], hear: true, vw: en }); }
+function listenWord([en, ko]) { return mk({ type: 'type', title: '들리는 단어를 입력하세요', prompt: '🔊', say: en, ans: [en], hear: true, vw: en, why: `뜻: ${ko}` }); }
 function orderSent([en, ko]) {
   const words = en.replace(/[.?!]$/, '').split(' ');
-  return mk({ type: 'order', title: '영어로 배열하세요', prompt: ko, words, ans: en });
+  return mk({ type: 'order', title: '영어로 배열하세요', prompt: ko, words, ans: en, why: `뜻: ${ko}` });
 }
-function listenSent([en]) { return mk({ type: 'type', title: '들리는 문장을 입력하세요', prompt: '🔊', say: en, ans: [en], hear: true }); }
+function listenSent([en, ko]) { return mk({ type: 'type', title: '들리는 문장을 입력하세요', prompt: '🔊', say: en, ans: [en], hear: true, why: `뜻: ${ko}` }); }
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-function speakEx([en]) { return mk({ type: 'speak', title: '소리 내어 읽어 보세요', prompt: en, say: en, ans: [en] }); }
-function grammar([q, opts, a]) { return mk({ type: 'mcq', title: '빈칸에 알맞은 말을 고르세요', prompt: q, opts, a }); }
+function speakEx([en, ko]) { return mk({ type: 'speak', title: '소리 내어 읽어 보세요', prompt: en, say: en, ans: [en], why: `뜻: ${ko}` }); }
+// 답을 낸 뒤 보여줄 내용: 완성된 문장 + 번역 + 해설
+function gExtra([q, opts, a, why, tr]) {
+  const lines = [];
+  if (q.includes('___')) { lines.push(q.replace('___', opts[a])); if (tr) lines.push(tr); }
+  if (why) lines.push('💡 ' + why);
+  return lines.join('\n');
+}
+function grammar(g) { return mk({ type: 'mcq', title: '빈칸에 알맞은 말을 고르세요', prompt: g[0], opts: g[1], a: g[2], why: gExtra(g) }); }
 
 function buildLesson(lv, ui) {
   const u = UNITS[lv][ui], pool = UNITS[lv].flatMap(x => x.v);
   const vs = shuffle(u.v), ss = shuffle(u.s), ex = [];
-  vs.slice(0, 4).forEach(v => ex.push(mcqEnKo(v, pool)));
-  vs.slice(4, 8).forEach(v => ex.push(mcqKoEn(v, pool)));
+  vs.slice(0, 4).forEach(v => ex.push(mcqEnKo(v, pool, lv)));
+  vs.slice(4, 8).forEach(v => ex.push(mcqKoEn(v, pool, lv)));
   shuffle(u.v).slice(0, 2).forEach(v => ex.push(listenWord(v)));
   ss.forEach(s => ex.push(orderSent(s)));
   ex.push(listenSent(ss[0]));
@@ -76,7 +116,7 @@ function buildLesson(lv, ui) {
   // 지난 유닛 단어 복습(간격 반복): 앞서 끝낸 유닛에서 최대 4개
   const prev = [];
   for (let i = 0; i < ui; i++) if (S.done[lv + '-' + i]) prev.push(...UNITS[lv][i].v);
-  shuffle(prev).slice(0, 4).forEach((v, i) => ex.push(i % 2 ? mcqKoEn(v, pool) : mcqEnKo(v, pool)));
+  shuffle(prev).slice(0, 4).forEach((v, i) => ex.push(i % 2 ? mcqKoEn(v, pool, lv) : mcqEnKo(v, pool, lv)));
   return shuffle(ex);
 }
 
@@ -91,8 +131,19 @@ function shell(onQuit) {
   const body = el('div', 'body'); body.id = 'body';
   const foot = el('div', 'foot'); foot.id = 'foot';
   app.append(top, body, foot);
+  const wb = el('button', 'x whybtn', '💡'); wb.title = '정답 후 번역·해설 켜기/끄기';
+  const paint = () => { wb.style.opacity = cfg().why ? 1 : .3; };
+  wb.onclick = () => { cfg().why = !cfg().why; save(); applyWhy(); paint(); wb.classList.add('pop'); setTimeout(() => wb.classList.remove('pop'), 300); };
+  paint(); top.append(wb);
   x.onclick = () => { if (confirm('그만둘까요? 이번 진행은 저장되지 않아요.')) { keyHandler = null; onQuit(); } };
   return p => { fill.style.width = Math.round(p * 100) + '%'; };
+}
+
+function mcqDetail(ex, sel) {
+  let d = '';
+  if (sel && sel.t) d += `내 답: ${sel.t}\n`;
+  d += `정답: ${ex.opts[ex.a]}`;
+  return d;
 }
 
 /* 문제 하나를 보여주고, 사용자가 '계속'을 누르면 done(정답여부) 호출 */
@@ -106,12 +157,13 @@ function ask(ex, done, opts = {}) {
   foot.append(btn); if (skip) foot.append(skip);
 
   let phase = 'ask', check = () => {}, lock = () => {}, answer = '';
-  const finish = (ok, detail) => {
+  const finish = (ok, detail, extra) => {
     phase = 'fb'; lock();
     foot.className = 'foot ' + (ok ? 'ok' : 'bad');
     foot.innerHTML = '';
     const fb = el('div', 'fb'); fb.append(el('b', '', ok ? pick(['정답!', '잘했어요!', '좋아요!']) : '아쉬워요'));
     if (detail) fb.append(el('div', '', detail));
+    if (extra) fb.append(el('div', 'why', extra));
     const c = el('button', 'btn ' + (ok ? 'primary' : 'danger'), '계속');
     c.onclick = () => { keyHandler = null; done(ok); };
     foot.append(fb, c);
@@ -132,9 +184,9 @@ function ask(ex, done, opts = {}) {
     body.append(list);
     check = () => {
       bs.forEach((b, i) => { if (opts2[i].ok) b.classList.add('right'); else if (opts2[i] === sel) b.classList.add('wrong'); });
-      finish(sel.ok, sel.ok ? '' : '정답: ' + ex.opts[ex.a]);
+      finish(sel.ok, sel.ok ? '' : mcqDetail(ex, sel), ex.why);
     };
-    if (skip) skip.onclick = () => { if (phase !== 'ask') return; sel = { ok: false }; bs.forEach((b, i) => opts2[i].ok && b.classList.add('right')); finish(false, '정답: ' + ex.opts[ex.a]); };
+    if (skip) skip.onclick = () => { if (phase !== 'ask') return; sel = { ok: false }; bs.forEach((b, i) => opts2[i].ok && b.classList.add('right')); finish(false, mcqDetail(ex, null), ex.why); };
     keyHandler = e => {
       if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); }
       else if (phase === 'ask' && /^[1-9]$/.test(e.key) && bs[+e.key - 1]) bs[+e.key - 1].click();
@@ -153,7 +205,13 @@ function ask(ex, done, opts = {}) {
       btn.disabled = built.length === 0;
     };
     draw();
-    check = () => { const ok = norm(built.map(c => c.w).join(' ')) === norm(ex.ans); finish(ok, ok ? '' : '정답: ' + ex.ans); };
+    check = () => {
+      const mine = built.map(c => c.w).join(' '), ok = norm(mine) === norm(ex.ans);
+      let d = `내 답: ${mine}\n정답: ${ex.ans}`;
+      const a = norm(mine).split(' ').sort().join(' '), b = norm(ex.ans).split(' ').sort().join(' ');
+      d += a === b ? '\n단어는 맞아요. 순서를 확인해 보세요.' : '\n빠졌거나 잘못 고른 단어가 있어요.';
+      finish(ok, ok ? '' : d, ex.why);
+    };
     keyHandler = e => { if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); } };
   }
 
@@ -164,14 +222,24 @@ function ask(ex, done, opts = {}) {
     const inp = el('input', 'ans'); inp.autocapitalize = 'off'; inp.autocomplete = 'off'; inp.spellcheck = false; inp.placeholder = '영어로 입력';
     inp.oninput = () => { btn.disabled = !inp.value.trim(); };
     body.append(inp); setTimeout(() => inp.focus(), 50);
-    check = () => { const ok = ex.ans.some(a => norm(a) === norm(inp.value)); finish(ok, ok ? '' : '정답: ' + ex.ans[0]); };
+    check = () => {
+      const ok = ex.ans.some(a => norm(a) === norm(inp.value));
+      let d = `내 답: ${inp.value.trim()}\n정답: ${ex.ans[0]}`;
+      const u = norm(inp.value).split(' ').filter(Boolean), t = norm(ex.ans[0]).split(' ');
+      if (t.length > 1) {
+        const extra = u.filter(w => !t.includes(w)), miss = t.filter(w => !u.includes(w));
+        if (extra.length) d += '\n잘못 쓴 단어: ' + extra.join(', ');
+        if (miss.length) d += '\n빠지거나 다르게 쓴 단어: ' + miss.join(', ');
+      }
+      finish(ok, ok ? '' : d, ex.why);
+    };
     lock = () => { inp.disabled = true; };
     if (ex.hear) {
       // 소리가 안 나올 때를 위한 건너뛰기: 정답·오답 어느 쪽으로도 세지 않는다
       // 키보드가 올라와도 가려지지 않게 하단 바가 아니라 입력칸 바로 아래에 둔다
       skip = el('button', 'btn', '🔇 지금은 들을 수 없어요 (건너뛰기)'); skip.style.marginTop = '18px'; body.append(skip);
       skip.onclick = () => { if (phase !== 'ask') return; keyHandler = null; done('skip'); };
-    } else if (skip) skip.onclick = () => finish(false, '정답: ' + ex.ans[0]);
+    } else if (skip) skip.onclick = () => finish(false, '정답: ' + ex.ans[0], ex.why);
     keyHandler = e => { if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); } };
   }
 }
@@ -192,7 +260,7 @@ ask = function (ex, done, opts) {
   keyHandler = null;
   const finish = (ok, detail) => {
     over = true; foot.className = 'foot ' + (ok ? 'ok' : 'bad'); foot.innerHTML = '';
-    const fb = el('div', 'fb'); fb.append(el('b', '', ok ? '발음 좋아요!' : '다시 연습해요')); if (detail) fb.append(el('div', '', detail));
+    const fb = el('div', 'fb'); fb.append(el('b', '', ok ? '발음 좋아요!' : '다시 연습해요')); if (detail) fb.append(el('div', '', detail)); if (ex.why) fb.append(el('div', 'why', ex.why));
     const nb = el('button', 'btn ' + (ok ? 'primary' : 'danger'), '계속'); nb.onclick = () => done(ok); foot.append(fb, nb);
   };
   mic.onclick = () => {
@@ -213,10 +281,10 @@ ask = function (ex, done, opts) {
 
 /* ---------- 실력 테스트 (처음 = 레벨 배치, 이후 = 실력 점검) ---------- */
 function testPool() {
-  const out = PLACEMENT.map((r, i) => ({ lv: r[0], q: r[1], o: r[2], a: r[3], id: 'p' + i, seen: false }));
+  const out = PLACEMENT.map((r, i) => ({ lv: r[0], q: r[1], o: r[2], a: r[3], why: gExtra([r[1], r[2], r[3], r[4], r[5]]), id: 'p' + i, seen: false }));
   for (const lv in UNITS) UNITS[lv].forEach((u, ui) => {
     const seen = !!S.done[lv + '-' + ui];
-    u.g.forEach((g, gi) => out.push({ lv: +lv, q: g[0], o: g[1], a: g[2], id: `u${lv}-${ui}-${gi}`, seen }));
+    u.g.forEach((g, gi) => out.push({ lv: +lv, q: g[0], o: g[1], a: g[2], why: gExtra(g), id: `u${lv}-${ui}-${gi}`, seen }));
   });
   return out;
 }
@@ -246,7 +314,7 @@ function startPlacement(isCheck) {
         if (arr.length) q = pick(arr); else d++;
       }
       used.add(q.id); ids.push(q.id);
-      ask({ type: 'mcq', title: `문제 ${n + 1} / ${N}`, prompt: q.q, opts: q.o, a: q.a },
+      ask({ type: 'mcq', title: `문제 ${n + 1} / ${N}`, prompt: q.q, opts: q.o, a: q.a, why: q.why },
         ok => { asked.push({ lv: q.lv, ok }); L = Math.max(1, Math.min(5, L + (ok ? 1 : -1))); n++; next(); },
         { skippable: true });
     };
@@ -317,7 +385,8 @@ function home() {
   const top = el('div', 'topbar');
   const lvb = el('button', 'chip lv', `Lv.${lv} ${LV_NAME[lv]} ▾`); lvb.onclick = levelSheet;
   const right = el('div'); right.style.cssText = 'display:flex;gap:6px';
-  right.append(el('div', 'chip fire', '🔥 ' + S.streak), el('div', 'chip xp', '⭐ ' + S.xp));
+  const gear = el('button', 'chip', '⚙️'); gear.onclick = settingsSheet;
+  right.append(el('div', 'chip fire', '🔥 ' + S.streak), el('div', 'chip xp', '⭐ ' + S.xp), gear);
   top.append(lvb, right);
   const sc = el('div', 'scroll');
   const doneN = UNITS[lv].filter((_, i) => S.done[lv + '-' + i]).length;
@@ -363,6 +432,22 @@ function home() {
   app.append(top, sc);
 }
 
+function settingsSheet() {
+  const ov = el('div', 'overlay'), sh = el('div', 'sheet'); ov.append(sh);
+  sh.append(el('h3', '', '⚙️ 설정'));
+  const row = (title, desc, key) => {
+    const r = el('button', 'lvrow'); const sw = el('span', 'sw');
+    const paint = () => { sw.className = 'sw' + (cfg()[key] ? ' on' : ''); sw.textContent = cfg()[key] ? '켜짐' : '꺼짐'; };
+    r.innerHTML = `<span><b>${title}</b><small>${desc}</small></span>`; r.append(sw); paint();
+    r.onclick = () => { cfg()[key] = !cfg()[key]; save(); applyWhy(); paint(); };
+    sh.append(r);
+  };
+  row('정답 후 번역·해설', '답을 낸 뒤(맞든 틀리든) 예문 번역과 해설을 보여줘요. 공부 중에도 상단 💡로 바꿀 수 있어요.', 'why');
+  row('레슨 전 단어 미리보기', '레슨을 시작하기 전에 단어와 문장을 먼저 보여줘요. 끄면 바로 문제가 나와요.', 'preview');
+  const c = el('button', 'btn ghost', '닫기'); c.onclick = () => ov.remove(); sh.append(c);
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.body.append(ov);
+}
 function levelSheet() {
   const ov = el('div', 'overlay'), sh = el('div', 'sheet'); ov.append(sh);
   sh.append(el('h3', '', '레벨 선택'));
@@ -440,6 +525,7 @@ function backupSheet() {
 
 /* ---------- 레슨 ---------- */
 function lessonIntro(lv, ui) {
+  if (!cfg().preview) return runSession(buildLesson(lv, ui), { lv, ui }); // 설정에서 미리보기를 켠 경우에만 단어 목록을 먼저 보여줌
   const u = UNITS[lv][ui]; app.innerHTML = '';
   const sc = el('div', 'scroll');
   sc.append(el('div', 'h1', `${u.i} ${u.t}`), el('p', 'p', '먼저 단어와 문장을 훑어보세요. 🔊를 누르면 발음을 들을 수 있어요.'));

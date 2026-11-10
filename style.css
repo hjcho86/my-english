@@ -128,3 +128,16 @@ input.ans:focus{border-color:var(--blue)}
 .skrow{display:flex;gap:8px;margin-top:12px}
 .skrow>div{flex:1;background:var(--card);border-radius:12px;padding:10px 4px;text-align:center}
 .skrow b{display:block;font-size:18px}.skrow span{font-size:11px;color:var(--sub)}
+
+/* 오답 설명 줄바꿈 */
+.fb div{white-space:pre-line;font-size:15px;margin-top:4px;font-weight:400}
+
+/* 정답 후 번역·해설 */
+.fb .why{margin-top:8px;padding-top:8px;border-top:1px dashed currentColor;font-size:15px;line-height:1.5;color:var(--fg);font-weight:400}
+.foot.ok .fb .why,.foot.bad .fb .why{color:var(--fg)}
+.nowhy .fb .why{display:none}
+.whybtn.pop{transform:scale(1.3)}
+.whybtn{transition:transform .2s,opacity .2s}
+.sw{flex:none;padding:6px 12px;border-radius:999px;background:var(--line);color:var(--sub);font-size:13px;font-weight:800}
+.sw.on{background:var(--green);color:#fff}
+.sheet .lvrow{gap:12px}
