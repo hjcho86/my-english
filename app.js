@@ -123,6 +123,7 @@ function buildLesson(lv, ui) {
 
 /* ---------- 세션 공통 ---------- */
 let keyHandler = null;
+const FINE = !!(window.matchMedia && matchMedia('(pointer:fine)').matches); // 마우스·키보드가 있는 컴퓨터인지
 document.addEventListener('keydown', e => keyHandler && keyHandler(e));
 
 function shell(onQuit) {
@@ -238,10 +239,15 @@ function ask(ex, done, opts = {}) {
     if (ex.hear) {
       // 소리가 안 나올 때를 위한 건너뛰기: 정답·오답 어느 쪽으로도 세지 않는다
       // 키보드가 올라와도 가려지지 않게 하단 바가 아니라 입력칸 바로 아래에 둔다
-      skip = el('button', 'btn', '🔇 지금은 들을 수 없어요 (건너뛰기)'); skip.style.marginTop = '18px'; body.append(skip);
+      skip = el('button', 'btn', '🔇 지금은 들을 수 없어요 (건너뛰기)' + (FINE ? '  ·  Enter' : '')); skip.style.marginTop = '18px'; body.append(skip);
       skip.onclick = () => { if (phase !== 'ask') return; keyHandler = null; done('skip'); };
     } else if (skip) skip.onclick = () => finish(false, '정답: ' + ex.ans[0], ex.why);
-    keyHandler = e => { if (e.key === 'Enter') { phase === 'ask' ? (!btn.disabled && check()) : foot.querySelector('.btn').click(); } };
+    keyHandler = e => {
+      if (e.key !== 'Enter' || e.repeat) return;
+      if (phase !== 'ask') foot.querySelector('.btn').click();        // 정답 확인 후: 계속
+      else if (!btn.disabled) check();                                // 입력했으면: 확인
+      else if (ex.hear && FINE) skip.click();                         // 컴퓨터에서 빈 칸으로 Enter: 건너뛰기
+    };
   }
 }
 
@@ -255,10 +261,14 @@ ask = function (ex, done, opts) {
   const p = el('div', 'prompt'); p.append(sayBtn(ex.say), el('span', '', ex.prompt)); body.append(p);
   const c = el('div', 'center'), mic = el('button', 'say big', '🎤'); c.append(mic); body.append(c);
   const status = el('p', 'hint center', '마이크를 누르고 문장을 읽어 보세요'); status.style.textAlign = 'center'; body.append(status);
-  const skip = el('button', 'btn ghost', '지금은 말할 수 없어요'); foot.append(skip);
+  const skip = el('button', 'btn ghost', '지금은 말할 수 없어요' + (FINE ? '  ·  Enter' : '')); foot.append(skip);
   let busy = false, over = false;
-  skip.onclick = () => { keyHandler = null; done('skip'); };
-  keyHandler = null;
+  skip.onclick = () => { if (over) return; over = true; keyHandler = null; done('skip'); };
+  keyHandler = e => {
+    if (e.key !== 'Enter' || e.repeat) return;
+    if (over) foot.querySelector('.btn')?.click();   // 결과를 본 뒤: 계속
+    else if (FINE) skip.click();                      // 컴퓨터에서 Enter: 건너뛰기
+  };
   const finish = (ok, detail) => {
     over = true; foot.className = 'foot ' + (ok ? 'ok' : 'bad'); foot.innerHTML = '';
     const fb = el('div', 'fb'); fb.append(el('b', '', ok ? '발음 좋아요!' : '다시 연습해요')); if (detail) fb.append(el('div', '', detail)); if (ex.why) fb.append(el('div', 'why', ex.why));
@@ -269,6 +279,7 @@ ask = function (ex, done, opts) {
     const r = new SR(); r.lang = 'en-US'; r.interimResults = false; r.maxAlternatives = 3;
     status.textContent = '듣는 중... 말해 보세요';
     r.onresult = e => {
+      if (over) return; // 이미 건너뛴 문제의 늦은 결과는 무시
       const target = norm(ex.ans[0]).split(' ');
       let best = 0, heard = '';
       [...e.results[0]].forEach(a => { const hw = norm(a.transcript).split(' '); const sc = target.filter(w => hw.includes(w)).length / target.length; if (sc >= best) { best = sc; heard = a.transcript; } });
